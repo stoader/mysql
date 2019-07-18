@@ -1,0 +1,133 @@
+pipeline:
+  create_cluster:
+    image: banzaicloud/ci-pipeline-client:0.11
+    cluster:
+      action: GetCluster
+      cloud: amazon
+      name: stoaderw23e
+    action: EnsureCluster
+  prepare_deployment_package:
+    when:
+      branch:
+        include:
+        - master
+    image: lachlanevenson/k8s-helm:v2.11.0
+    commands:
+    - helm init -c
+    - helm package ./.banzaicloud/charts/mysql-spotguide
+    - helm repo add presslabs https://presslabs.github.io/charts
+    - helm fetch presslabs/mysql-operator --version 0.2.9
+  install_mysql_root_secret:
+    action: InstallSecret
+    clusterSecret:
+      merge: true
+      name: '{{ .CICD_REPO_NAME }}-mysql'
+      namespace: default
+      sourceSecretName: mysql-mysql-root-password
+      spec:
+      - name: ROOT_USER
+        source: username
+      - name: ROOT_PASSWORD
+        source: password
+    image: banzaicloud/ci-pipeline-client:0.11
+    when:
+      branch:
+        include:
+        - master
+  install_mysql_user_secret:
+    action: InstallSecret
+    clusterSecret:
+      merge: true
+      name: '{{ .CICD_REPO_NAME }}-mysql'
+      namespace: default
+      sourceSecretName: mysql-mysql-database-secret
+      spec:
+      - name: USER
+        source: username
+      - name: PASSWORD
+        source: password
+    image: banzaicloud/ci-pipeline-client:0.11
+    when:
+      branch:
+        include:
+        - master
+  install_phpmyadmin_control_secret:
+    action: InstallSecret
+    clusterSecret:
+      merge: true
+      name: '{{ .CICD_REPO_NAME }}-phpmyadmin'
+      namespace: default
+      sourceSecretName: mysql-phpmyadmin-control-secret
+      spec:
+      - name: username
+        source: username
+      - name: password
+        source: password
+    image: banzaicloud/ci-pipeline-client:0.11
+    when:
+      branch:
+        include:
+        - master
+  deploy_mysql_operator:
+    when:
+      branch:
+        include:
+        - master
+    image: banzaicloud/ci-pipeline-client:0.11
+    action: EnsureDeployment
+    deployment:
+      name: ./mysql-operator-0.2.9.tgz
+      releaseName: mysql-operator
+      reuseValues: true
+      namespace: pipeline-system
+      values:
+        helperImage: banzaicloud/mysql-helper:0.1.15
+        replicaCount: 1
+        rbac:
+          create: true
+          serviceAccountName: mysql-operator
+  deploy_mysql_cluster:
+    action: EnsureDeployment
+    deployment:
+      name: ./mysql-spotguide-0.0.2.tgz
+      releaseName: '{{ .CICD_REPO_NAME }}'
+      reuseValues: true
+      timeout: 900
+      values:
+        mysql:
+          backup:
+            bucket: null
+            cloud: null
+            enabled: false
+            location: null
+            secret: '{{ .CICD_REPO_NAME }}-backup'
+          conf: |
+            # innodb_buffer_pool_size: 128M
+          database: sebtest
+          existingSecret: '{{ .CICD_REPO_NAME }}-mysql'
+          replicas: 3
+          version: "5.7"
+          volumeSpec:
+            resources:
+              requests:
+                storage: 10Gi
+        nameOverride: '{{ .CICD_REPO_NAME }}'
+        phpmyadmin:
+          enabled: true
+          existingSecret: '{{ .CICD_REPO_NAME }}-phpmyadmin'
+          image:
+            tag: "4.8"
+          ingress:
+            annotations:
+              kubernetes.io/ingress.class: traefik
+              traefik.ingress.kubernetes.io/redirect-permanent: "true"
+              traefik.ingress.kubernetes.io/redirect-regex: ^http://(.*)
+              traefik.ingress.kubernetes.io/redirect-replacement: https://$1
+            hosts:
+            - '{{ lower (printf "admin-%s-%s.%s.%s" .CICD_REPO_NAME (.CLUSTER_NAME | sha1sum | trunc 10) .ORG_NAME .DOMAIN_NAME) }}'
+      wait: true
+    image: banzaicloud/ci-pipeline-client:0.11
+    when:
+      branch:
+        include:
+        - master
